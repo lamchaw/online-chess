@@ -129,23 +129,23 @@
 </head>
 <body class="min-h-screen flex flex-col items-center justify-center p-4">
 
-    <!-- 메인 컨테이너 -->
+    <!-- Main Container -->
     <div class="w-full max-w-xl bg-white shadow-2xl rounded-xl p-6 md:p-8 space-y-6">
         <h1 class="text-3xl font-extrabold text-primary text-center">
             ♟️ 온라인 PvP 체스 
         </h1>
 
-        <!-- 유저 ID 표시 -->
+        <!-- User ID Display -->
         <div class="text-xs text-center text-gray-500 break-words">
             내 ID: <span id="user-id">인증 중...</span>
         </div>
         
-        <!-- 로딩 및 인증 상태 -->
+        <!-- Loading and Auth Status -->
         <div id="loading-status" class="text-center text-accent font-semibold">
             데이터베이스 연결 중...
         </div>
 
-        <!-- 룸 관리 영역 -->
+        <!-- Room Management Area -->
         <div id="room-selection" class="hidden space-y-4">
             <h2 class="text-xl font-bold text-gray-700 text-center">방 선택</h2>
             
@@ -162,23 +162,23 @@
             </div>
         </div>
 
-        <!-- 로비/게임 영역 -->
+        <!-- Game Area -->
         <div id="game-area" class="hidden flex flex-col items-center space-y-4">
             <div id="room-info" class="text-center w-full p-2 bg-gray-100 rounded-lg">
                 <p class="font-bold text-lg" id="current-room-name"></p>
-                <!-- 플레이어 ID 표시를 업데이트하고 애니메이션을 위한 ID 추가 -->
+                <!-- Player ID Display -->
                 <p class="text-sm">
                     백: <span id="white-player-id"></span> | 흑: <span id="black-player-id"></span>
                 </p>
                 <button id="leave-room-btn" class="text-red-500 text-xs mt-1 hover:underline">방 나가기</button>
             </div>
 
-            <!-- 체스 보드 -->
+            <!-- Chess Board -->
             <div id="board" class="w-full">
                 <!-- Board will be rendered here -->
             </div>
             
-            <!-- 상태 표시 및 액션 버튼 -->
+            <!-- Status Display and Action Button -->
             <div class="flex justify-between w-full max-w-[480px]">
                 <button id="reset-button" class="px-4 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg shadow hover:bg-gray-300 transition duration-150">
                     게임 다시 시작 (방장만 가능)
@@ -195,9 +195,20 @@
         const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
                 getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, deleteDoc, setLogLevel } = window.firebase;
 
-        // Mandatorily provided global variables
+        // Mandatorily provided global variables (will be undefined/empty string in external hosting)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // IMPORTANT FIX: Parse __firebase_config. Use an empty object if parsing fails.
+        let firebaseConfig = {};
+        try {
+            const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+            // Check if the string actually contains configuration data (e.g., if it's not just "{}")
+            if (configString.length > 2) {
+                firebaseConfig = JSON.parse(configString);
+            }
+        } catch (e) {
+            console.error("Failed to parse firebase config:", e);
+        }
+        
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         let db;
@@ -237,7 +248,7 @@
         const gameStatusEl = document.getElementById('game-status');
         const resetButton = document.getElementById('reset-button');
         
-        // 유니코드 체스 기호
+        // Unicode Chess Pieces
         const pieces = {
             'p': '♙', 'n': '♘', 'b': '♗', 'r': '♖', 'q': '♕', 'k': '♔',
             'P': '♟', 'N': '♞', 'B': '♝', 'R': '♜', 'Q': '♛', 'K': '♚'
@@ -247,12 +258,27 @@
         async function initializeFirebase() {
             try {
                 // setLogLevel('Debug'); // Enable debug logging for Firestore
+                
+                // [DB 연결 오류 해결을 위한 중요 수정]
+                // 1. firebaseConfig에 projectId가 있는지 확인합니다.
+                //    Canvas 환경이 아닐 경우 이 값이 없으므로, 초기화를 건너뛰고 오류 메시지를 표시합니다.
+                if (!firebaseConfig.projectId) {
+                    const message = 'DB 연결 오류: Firebase 설정이 제공되지 않았습니다. (projectId 없음)';
+                    console.error(message);
+                    loadingStatusEl.textContent = message + '. 앱을 실행할 수 없습니다.';
+                    loadingStatusEl.classList.remove('text-accent');
+                    loadingStatusEl.classList.add('text-red-600');
+                    // UI 요소 비활성화
+                    createRoomBtn.disabled = true;
+                    newRoomNameInput.disabled = true;
+                    return; // Firebase 초기화를 중단
+                }
+                
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                // [수정된 인증 로직 시작]
-                // Promise를 사용하여 인증 상태를 기다리고 userId를 설정합니다.
+                // Authentication Logic
                 await new Promise(async (resolve, reject) => {
                     const authPromise = initialAuthToken 
                         ? signInWithCustomToken(auth, initialAuthToken)
@@ -263,16 +289,13 @@
                         userId = userCredential.user.uid;
                         resolve();
                     } catch (error) {
-                        // 인증 실패 시 오류 처리
                         console.error("Firebase Auth Error: Could not sign in.", error);
-                        // 이 경우에도 userId는 설정되어야 합니다 (익명 또는 랜덤 UUID),
-                        // 하지만 Canvas 환경에서는 커스텀 토큰 또는 익명 로그인이 필수이므로,
-                        // 실패 시 사용자에게 오류 메시지를 표시하고 애플리케이션 진행을 막습니다.
+                        // 인증 실패 시, 재시도 없이 오류를 사용자에게 표시
                         reject(error);
                     }
                 });
                 
-                // 인증 성공 후 UI 업데이트 및 상태 설정
+                // Authentication Success: Update UI and set state
                 userIdEl.textContent = userId;
                 isAuthReady = true;
                 loadingStatusEl.classList.add('hidden');
@@ -290,7 +313,6 @@
                 loadingStatusEl.classList.add('text-red-600');
             }
         }
-        // [수정된 인증 로직 끝]
 
         // --- Room Management ---
 
@@ -560,7 +582,7 @@
         }
         
         /**
-         * 시각적 랜덤화 애니메이션을 시작하고, 애니메이션이 끝나면 색상을 확정합니다.
+         * Starts visual randomization animation and confirms colors when the animation ends.
          */
         async function startColorRandomization(roomId, roomData) {
             if (isRandomizing) return;
@@ -618,7 +640,7 @@
 
 
         /**
-         * 체스판을 렌더링하고 이벤트 리스너를 설정합니다.
+         * Renders the chess board and sets up event listeners.
          */
         function renderBoard() {
             boardEl.innerHTML = '';
@@ -644,17 +666,17 @@
 
                     const piece = game.get(flippedSquareName);
                     
-                    // 모든 칸에 Piece element (placeholder 또는 실제 말)를 만듭니다.
+                    // Create piece element (placeholder or actual piece) on every square.
                     const pieceEl = document.createElement('span');
                     pieceEl.className = 'piece'; 
                     
                     if (piece) {
-                        // 실제 말
+                        // Actual piece
                         pieceEl.style.color = piece.color === 'w' ? '#FFFFFF' : '#000000';
                         pieceEl.style.textShadow = piece.color === 'w' ? '0 0 3px #333' : 'none'; 
                         pieceEl.textContent = pieces[piece.color === 'w' ? piece.type.toUpperCase() : piece.type.toLowerCase()];
                     } else {
-                        // 말이 없는 칸: 투명한 플레이스 홀더를 사용해 너비/높이를 유지합니다.
+                        // Empty square: use a transparent placeholder to maintain dimensions.
                         pieceEl.textContent = '♟'; 
                         pieceEl.style.visibility = 'hidden'; 
                     }
@@ -668,8 +690,8 @@
         }
 
         /**
-         * 선택된 말의 가능한 움직임을 하이라이트합니다.
-         * @param {string} squareName - 선택된 칸의 이름 (예: 'e2').
+         * Highlights possible moves for the selected piece.
+         * @param {string} squareName - The name of the selected square (e.g., 'e2').
          */
         function highlightMoves(squareName) {
             document.querySelectorAll('.possible-move, .selected').forEach(el => {
@@ -692,8 +714,8 @@
         }
 
         /**
-         * 체스판 칸 클릭 핸들러
-         * @param {Event} event - 클릭 이벤트.
+         * Chess board square click handler
+         * @param {Event} event - The click event.
          */
         async function handleSquareClick(event) {
             if (!currentRoomId || !myColor || game.game_over()) return;
@@ -701,23 +723,23 @@
             const clickedSquare = event.currentTarget.dataset.square;
             const piece = game.get(clickedSquare);
 
-            // 1. 턴 확인: 내 차례가 아니면 아무것도 할 수 없음
+            // 1. Check Turn: Cannot move if it's not my turn
             if (game.turn() !== myColor) {
                 console.log("Not your turn.");
                 return;
             }
 
             if (selectedSquare) {
-                // 2. 이미 말이 선택된 상태: 이동 시도
+                // 2. Piece already selected: Attempt to move
                 const tempGame = new Chess(game.fen());
                 const moveResult = tempGame.move({ 
                     from: selectedSquare, 
                     to: clickedSquare, 
-                    promotion: 'q' // 퀸으로 고정 승진
+                    promotion: 'q' // Fixed promotion to Queen
                 });
 
                 if (moveResult) {
-                    // 유효한 이동: Firestore에 업데이트
+                    // Valid move: Update Firestore
                     selectedSquare = null;
                     highlightMoves(null);
                     
@@ -728,7 +750,7 @@
                     }, { merge: true });
                     
                 } else {
-                    // 유효하지 않은 이동: 선택 변경 또는 해제
+                    // Invalid move: Change selection or deselect
                     if (piece && piece.color === myColor) {
                         selectedSquare = clickedSquare;
                         highlightMoves(selectedSquare);
@@ -738,7 +760,7 @@
                     }
                 }
             } else {
-                // 3. 말이 선택되지 않은 상태: 내 말 선택 시도
+                // 3. No piece selected: Attempt to select my piece
                 if (piece && piece.color === myColor) {
                     selectedSquare = clickedSquare;
                     highlightMoves(selectedSquare);
@@ -747,8 +769,8 @@
         }
 
         /**
-         * 게임 상태 메시지를 업데이트합니다.
-         * @param {string} roomStatus - Firestore의 room.status
+         * Updates the game status message.
+         * @param {string} roomStatus - room.status from Firestore
          */
         function updateStatus(roomStatus) {
             let status = '';
@@ -801,7 +823,7 @@
                 const roomSnapshot = await getDoc(roomDocRef);
                 const roomData = roomSnapshot.data();
 
-                // 방장(createdBy)만 리셋 가능하도록 제한
+                // Limit reset to the creator (createdBy)
                 if (roomData.createdBy !== userId) {
                     // Use custom UI for alerts
                     gameStatusEl.textContent = "방장(방을 만든 사람)만 게임을 리셋할 수 있습니다.";
@@ -809,13 +831,13 @@
                     return;
                 }
 
-                // 리셋
+                // Reset
                 game.reset();
                 await setDoc(roomDocRef, {
                     fen: game.fen(),
                     turn: 'w',
                     status: 'PLAYING',
-                    // 플레이어는 그대로 유지
+                    // Players remain the same
                 }, { merge: true });
 
             } catch (error) {
@@ -835,7 +857,7 @@
 
         // --- Initial Execution ---
         window.onload = () => {
-             // Firebase 초기화 및 인증 시작
+             // Start Firebase initialization and authentication
              initializeFirebase();
         };
 
