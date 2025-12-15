@@ -251,27 +251,32 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                await new Promise(resolve => {
-                    // Check initial auth state
-                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-                        unsubscribe(); 
-                        if (user) {
-                            userId = user.uid;
-                        } else if (initialAuthToken) {
-                            await signInWithCustomToken(auth, initialAuthToken);
-                            userId = auth.currentUser.uid;
-                        } else {
-                            // Fallback to anonymous sign-in if no custom token
-                            const anonUser = await signInAnonymously(auth);
-                            userId = anonUser.user.uid;
-                        }
-                        userIdEl.textContent = userId;
-                        isAuthReady = true;
-                        loadingStatusEl.classList.add('hidden');
-                        resolve();
-                    });
-                });
+                // [수정된 인증 로직 시작]
+                // Promise를 사용하여 인증 상태를 기다리고 userId를 설정합니다.
+                await new Promise(async (resolve, reject) => {
+                    const authPromise = initialAuthToken 
+                        ? signInWithCustomToken(auth, initialAuthToken)
+                        : signInAnonymously(auth);
 
+                    try {
+                        const userCredential = await authPromise;
+                        userId = userCredential.user.uid;
+                        resolve();
+                    } catch (error) {
+                        // 인증 실패 시 오류 처리
+                        console.error("Firebase Auth Error: Could not sign in.", error);
+                        // 이 경우에도 userId는 설정되어야 합니다 (익명 또는 랜덤 UUID),
+                        // 하지만 Canvas 환경에서는 커스텀 토큰 또는 익명 로그인이 필수이므로,
+                        // 실패 시 사용자에게 오류 메시지를 표시하고 애플리케이션 진행을 막습니다.
+                        reject(error);
+                    }
+                });
+                
+                // 인증 성공 후 UI 업데이트 및 상태 설정
+                userIdEl.textContent = userId;
+                isAuthReady = true;
+                loadingStatusEl.classList.add('hidden');
+                
                 if (isAuthReady) {
                     renderBoard(); // Initial board structure
                     showRoomSelection();
@@ -285,6 +290,7 @@
                 loadingStatusEl.classList.add('text-red-600');
             }
         }
+        // [수정된 인증 로직 끝]
 
         // --- Room Management ---
 
