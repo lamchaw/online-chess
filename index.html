@@ -8,7 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Chess.js Library for game logic -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
-    <!-- Firebase SDK Imports -->
+    <!-- Firebase SDK Imports (v11.6.1) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -195,28 +195,59 @@
         const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
                 getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, deleteDoc, setLogLevel } = window.firebase;
 
-        // Mandatorily provided global variables (will be undefined/empty string in external hosting)
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        // IMPORTANT FIX: Parse __firebase_config. Use an empty object if parsing fails.
-        let firebaseConfig = {};
-        try {
-            const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
-            // Check if the string actually contains configuration data (e.g., if it's not just "{}")
-            if (configString.length > 2) {
-                firebaseConfig = JSON.parse(configString);
-            }
-        } catch (e) {
-            console.error("Failed to parse firebase config:", e);
-        }
-        
+        // ====================================================================================
+        // [필수 수정]: 외부 호스팅 환경(GitHub Pages 등)을 위한 Firebase 설정
+        // 이 부분을 사용자님의 실제 Firebase 프로젝트 설정으로 변경했습니다.
+        // Canvas 환경에서는 무시됩니다.
+        const EXTERNAL_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyAt_K9vZTYoAdUeCHGIAEwjFLlJTiuSwEU",
+            authDomain: "chess-online-2a974.firebaseapp.com",
+            projectId: "chess-online-2a974",
+            storageBucket: "chess-online-2a974.firebasestorage.app",
+            messagingSenderId: "9846616034",
+            appId: "1:9846616034:web:50572672033cf59bc093bb"
+            // measurementId는 게임 로직에 필요하지 않으므로 생략합니다.
+        };
+        // ====================================================================================
+
+        // Canvas 환경에서 제공되는 전역 변수 (외부 호스팅에서는 undefined)
+        const __app_id_canvas = typeof __app_id !== 'undefined' ? __app_id : null;
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
+        let firebaseConfig = {};
+        let appId = 'default-app-id'; // 외부 호스팅 환경의 기본값
+
+        // 1. Canvas 환경 설정 로드 시도
+        try {
+            const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+            if (configString.length > 2) {
+                const canvasConfig = JSON.parse(configString);
+                // Canvas 환경에서 유효한 설정을 찾으면 사용
+                if (canvasConfig.projectId) {
+                    firebaseConfig = canvasConfig;
+                    appId = __app_id_canvas || canvasConfig.projectId;
+                }
+            }
+        } catch (e) {
+            console.error("Failed to parse canvas firebase config:", e);
+        }
+
+        // 2. Canvas 설정이 없거나 유효하지 않으면, 외부 설정 사용
+        if (!firebaseConfig.projectId && EXTERNAL_FIREBASE_CONFIG.projectId) {
+            firebaseConfig = EXTERNAL_FIREBASE_CONFIG;
+            appId = EXTERNAL_FIREBASE_CONFIG.projectId; // 외부 호스팅에서는 projectId를 appId로 사용
+            console.log("Using EXTERNAL_FIREBASE_CONFIG for initialization.");
+        } else if (firebaseConfig.projectId) {
+            console.log("Using CANVAS_FIREBASE_CONFIG for initialization.");
+        }
+        
         let db;
         let auth;
         let userId = null;
         let isAuthReady = false;
         
         // Firestore path helpers for public data
+        // artifacts/{appId}/public/data/{your_collection_name} 경로 사용
         const getRoomCollectionRef = () => {
             return collection(db, `artifacts/${appId}/public/data/chess_rooms`);
         };
@@ -259,15 +290,16 @@
             try {
                 // setLogLevel('Debug'); // Enable debug logging for Firestore
                 
-                // [DB 연결 오류 해결을 위한 중요 수정]
-                // 1. firebaseConfig에 projectId가 있는지 확인합니다.
-                //    Canvas 환경이 아닐 경우 이 값이 없으므로, 초기화를 건너뛰고 오류 메시지를 표시합니다.
+                // [DB 연결 오류 해결을 위한 중요 수정]: 유효한 설정이 있는지 확인
                 if (!firebaseConfig.projectId) {
                     const message = 'DB 연결 오류: Firebase 설정이 제공되지 않았습니다. (projectId 없음)';
                     console.error(message);
-                    loadingStatusEl.textContent = message + '. 앱을 실행할 수 없습니다.';
-                    loadingStatusEl.classList.remove('text-accent');
-                    loadingStatusEl.classList.add('text-red-600');
+                    loadingStatusEl.innerHTML = `
+                        <p class="text-red-600 font-bold">⚠️ ${message}</p>
+                        <p class="text-sm text-gray-700 mt-2">
+                        Firebase 설정이 누락되어 데이터베이스에 연결할 수 없습니다.
+                        </p>
+                    `;
                     // UI 요소 비활성화
                     createRoomBtn.disabled = true;
                     newRoomNameInput.disabled = true;
