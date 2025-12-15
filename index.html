@@ -1,1 +1,908 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PvP 온라인 체스</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chess.js Library for game logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <!-- Firebase SDK Imports (v11.6.1) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Expose Firebase components globally for the main script
+        window.firebase = {
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, deleteDoc, setLogLevel
+        };
+    </script>
 
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary': '#059669', // Emerald 600
+                        'secondary': '#10b981', // Emerald 500
+                        'accent': '#f59e0b', // Amber 500
+                        'bg-main': '#f0fdf4', // Emerald 50
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', 'sans-serif';
+            background-color: theme('colors.bg-main');
+        }
+
+        /* Chess Board Styles - Consistency Fix: added box-sizing */
+        #board {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            grid-template-rows: repeat(8, 1fr);
+            width: 100%;
+            aspect-ratio: 1 / 1; /* Keep the board square */
+            border: 4px solid #10b981; /* Accent border */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            max-width: 480px; /* Limit max size on large screens */
+        }
+        
+        .square {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3.5vmin; /* Responsive piece size */
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.2s;
+            box-sizing: border-box; /* Ensure padding/border doesn't affect grid sizing */
+        }
+
+        .light {
+            background-color: #f0d9b5;
+        }
+
+        .dark {
+            background-color: #b58863;
+        }
+
+        .selected {
+            background-color: #22c55e !important; /* Green 500 */
+        }
+
+        .possible-move {
+            position: relative;
+        }
+        
+        /* Highlight possible moves with a dot or circle */
+        .possible-move::after {
+            content: '';
+            position: absolute;
+            width: 30%;
+            height: 30%;
+            border-radius: 50%;
+            background-color: rgba(0, 0, 0, 0.3);
+            pointer-events: none; /* Allows click to pass through to the square */
+        }
+
+        .selected.possible-move::after {
+            background-color: rgba(255, 255, 255, 0.5); /* White dot on selected green square */
+        }
+
+        /* Piece Styling using Unicode */
+        .piece {
+            line-height: 1;
+            font-size: 8vmin;
+        }
+        
+        .randomizing-pulse {
+            animation: pulse 0.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* Responsive board size */
+        @media (max-width: 640px) {
+            .square {
+                font-size: 5vmin;
+            }
+            .piece {
+                font-size: 10vmin;
+            }
+            #board {
+                max-width: 90vw;
+            }
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Main Container -->
+    <div class="w-full max-w-xl bg-white shadow-2xl rounded-xl p-6 md:p-8 space-y-6">
+        <h1 class="text-3xl font-extrabold text-primary text-center">
+            ♟️ 온라인 PvP 체스 
+        </h1>
+
+        <!-- User ID Display -->
+        <div class="text-xs text-center text-gray-500 break-words">
+            내 ID: <span id="user-id">인증 중...</span>
+        </div>
+        
+        <!-- Loading and Auth Status -->
+        <div id="loading-status" class="text-center text-accent font-semibold">
+            데이터베이스 연결 중...
+        </div>
+
+        <!-- Room Management Area -->
+        <div id="room-selection" class="hidden space-y-4">
+            <h2 class="text-xl font-bold text-gray-700 text-center">방 선택</h2>
+            
+            <div id="create-room-container" class="flex flex-col md:flex-row gap-2">
+                <input id="new-room-name" type="text" placeholder="새 방 이름 입력" class="flex-grow p-2 border rounded-lg focus:ring-primary focus:border-primary">
+                <button id="create-room-btn" class="px-4 py-2 bg-primary text-white font-semibold rounded-lg shadow hover:bg-green-700 transition duration-150">
+                    방 만들기 (대기)
+                </button>
+            </div>
+
+            <h3 class="text-lg font-semibold text-gray-600 mt-4">참여 가능한 방</h3>
+            <div id="room-list" class="max-h-60 overflow-y-auto border p-3 rounded-lg space-y-2">
+                <!-- Room list items will be injected here -->
+            </div>
+        </div>
+
+        <!-- Game Area -->
+        <div id="game-area" class="hidden flex flex-col items-center space-y-4">
+            <div id="room-info" class="text-center w-full p-2 bg-gray-100 rounded-lg">
+                <p class="font-bold text-lg" id="current-room-name"></p>
+                <!-- Player ID Display -->
+                <p class="text-sm">
+                    백: <span id="white-player-id"></span> | 흑: <span id="black-player-id"></span>
+                </p>
+                <button id="leave-room-btn" class="text-red-500 text-xs mt-1 hover:underline">방 나가기</button>
+            </div>
+
+            <!-- Chess Board -->
+            <div id="board" class="w-full">
+                <!-- Board will be rendered here -->
+            </div>
+            
+            <!-- Status Display and Action Button -->
+            <div class="flex justify-between w-full max-w-[480px]">
+                <button id="reset-button" class="px-4 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg shadow hover:bg-gray-300 transition duration-150">
+                    게임 다시 시작 (방장만 가능)
+                </button>
+                <div id="game-status" class="text-lg font-bold text-primary">
+                    게임 시작 대기 중...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Firebase/App Initialization ---
+        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+                getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, deleteDoc, setLogLevel } = window.firebase;
+
+        // ====================================================================================
+        // [수정된 부분]: 외부 호스팅 환경(GitHub Pages 등)을 위한 Firebase 설정
+        // 사용자님께서 제공해주신 정확한 설정값입니다.
+        const EXTERNAL_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyAt_K9vZTYoAdUeCHGIAEwjFLlJTiuSwEU",
+            authDomain: "chess-online-2a974.firebaseapp.com",
+            projectId: "chess-online-2a974",
+            storageBucket: "chess-online-2a974.firebasestorage.app",
+            messagingSenderId: "9846616034",
+            appId: "1:9846616034:web:50572672033cf59bc093bb",
+            // measurementId는 게임 로직에 필요하지 않으므로 생략합니다.
+        };
+        // ====================================================================================
+
+        // Canvas 환경에서 제공되는 전역 변수 (외부 호스팅에서는 undefined)
+        const __app_id_canvas = typeof __app_id !== 'undefined' ? __app_id : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let firebaseConfig = {};
+        let appId = 'default-app-id'; // 외부 호스팅 환경의 기본값
+
+        // 1. Canvas 환경 설정 로드 시도
+        try {
+            const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+            if (configString.length > 2) {
+                const canvasConfig = JSON.parse(configString);
+                // Canvas 환경에서 유효한 설정을 찾으면 사용
+                if (canvasConfig.projectId) {
+                    firebaseConfig = canvasConfig;
+                    appId = __app_id_canvas || canvasConfig.projectId;
+                }
+            }
+        } catch (e) {
+            console.error("Failed to parse canvas firebase config:", e);
+        }
+
+        // 2. Canvas 설정이 없거나 유효하지 않으면, 외부 설정 사용
+        if (!firebaseConfig.projectId && EXTERNAL_FIREBASE_CONFIG.projectId) {
+            firebaseConfig = EXTERNAL_FIREBASE_CONFIG;
+            appId = EXTERNAL_FIREBASE_CONFIG.projectId; // 외부 호스팅에서는 projectId를 appId로 사용
+            console.log("Using EXTERNAL_FIREBASE_CONFIG for initialization.");
+        } else if (firebaseConfig.projectId) {
+            console.log("Using CANVAS_FIREBASE_CONFIG for initialization.");
+        }
+        
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        // Firestore path helpers for public data
+        // artifacts/{appId}/public/data/{your_collection_name} 경로 사용
+        const getRoomCollectionRef = () => {
+            return collection(db, `artifacts/${appId}/public/data/chess_rooms`);
+        };
+        const getRoomDocRef = (roomId) => {
+            return doc(db, `artifacts/${appId}/public/data/chess_rooms`, roomId);
+        };
+
+        // --- Global Game State ---
+        const game = new Chess();
+        let selectedSquare = null;
+        let currentRoomId = null;
+        let unsubscribeGameListener = null;
+        let myColor = null; // 'w' or 'b' or null (undetermined/spectator)
+        let isRandomizing = false; // Flag to prevent multiple randomization starts
+
+        // --- UI Elements ---
+        const boardEl = document.getElementById('board');
+        const userIdEl = document.getElementById('user-id');
+        const loadingStatusEl = document.getElementById('loading-status');
+        const roomSelectionEl = document.getElementById('room-selection');
+        const gameAreaEl = document.getElementById('game-area');
+        const newRoomNameInput = document.getElementById('new-room-name');
+        const createRoomBtn = document.getElementById('create-room-btn');
+        const roomListEl = document.getElementById('room-list');
+        const currentRoomNameEl = document.getElementById('current-room-name');
+        const whitePlayerIdEl = document.getElementById('white-player-id');
+        const blackPlayerIdEl = document.getElementById('black-player-id');
+        const leaveRoomBtn = document.getElementById('leave-room-btn');
+        const gameStatusEl = document.getElementById('game-status');
+        const resetButton = document.getElementById('reset-button');
+        
+        // Unicode Chess Pieces
+        const pieces = {
+            'p': '♙', 'n': '♘', 'b': '♗', 'r': '♖', 'q': '♕', 'k': '♔',
+            'P': '♟', 'N': '♞', 'B': '♝', 'R': '♜', 'Q': '♛', 'K': '♚'
+        };
+
+        // --- Firebase Setup and Auth ---
+        async function initializeFirebase() {
+            try {
+                // [디버그]: Firestore 로그 레벨을 Debug로 설정하여 자세한 로그를 콘솔에 출력
+                setLogLevel('Debug'); 
+                
+                // [DB 연결 오류 해결을 위한 중요 수정]: 유효한 설정이 있는지 확인
+                if (!firebaseConfig.projectId) {
+                    const message = 'DB 연결 오류: Firebase 설정이 제공되지 않았습니다. (projectId 없음)';
+                    console.error(message);
+                    loadingStatusEl.innerHTML = `
+                        <p class="text-red-600 font-bold">⚠️ ${message}</p>
+                        <p class="text-sm text-gray-700 mt-2">
+                        Firebase 설정이 누락되어 데이터베이스에 연결할 수 없습니다. 콘솔을 확인해주세요.
+                        </p>
+                    `;
+                    // UI 요소 비활성화
+                    createRoomBtn.disabled = true;
+                    newRoomNameInput.disabled = true;
+                    return; // Firebase 초기화를 중단
+                }
+
+                console.log("Attempting to initialize Firebase with config:", firebaseConfig);
+                
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                loadingStatusEl.textContent = "사용자 인증 시도 중...";
+
+                // Authentication Logic
+                await new Promise(async (resolve, reject) => {
+                    const authPromise = initialAuthToken 
+                        ? signInWithCustomToken(auth, initialAuthToken)
+                        : signInAnonymously(auth);
+
+                    try {
+                        const userCredential = await authPromise;
+                        userId = userCredential.user.uid;
+                        resolve();
+                    } catch (error) {
+                        console.error("Firebase Auth Error: Could not sign in. Check API Key and Auth settings.", error);
+                        // 인증 실패 시, 재시도 없이 오류를 사용자에게 표시
+                        reject(error);
+                    }
+                });
+                
+                // Authentication Success: Update UI and set state
+                userIdEl.textContent = userId;
+                isAuthReady = true;
+                loadingStatusEl.classList.add('hidden');
+                
+                if (isAuthReady) {
+                    renderBoard(); // Initial board structure
+                    showRoomSelection();
+                    setupRoomListListener();
+                }
+
+            } catch (error) {
+                console.error("Firebase Initialization/Connection Error:", error);
+                loadingStatusEl.textContent = `DB 연결 오류: ${error.message}. 콘솔을 확인해주세요.`;
+                loadingStatusEl.classList.remove('text-accent');
+                loadingStatusEl.classList.add('text-red-600');
+            }
+        }
+
+        // --- Room Management ---
+
+        function showRoomSelection() {
+            roomSelectionEl.classList.remove('hidden');
+            gameAreaEl.classList.add('hidden');
+        }
+
+        function showGameArea() {
+            roomSelectionEl.classList.add('hidden');
+            gameAreaEl.classList.remove('hidden');
+        }
+
+        async function createRoom() {
+            if (!isAuthReady || currentRoomId) return;
+
+            const roomName = newRoomNameInput.value.trim() || `Room by ${userId.substring(0, 8)}`;
+            
+            try {
+                // Initial room state uses player1/player2 fields
+                const newRoom = {
+                    name: roomName,
+                    fen: game.fen(), // Initial FEN
+                    turn: 'w',
+                    status: 'WAITING', // WAITING, JOINED, RANDOMIZING, PLAYING
+                    player1Id: userId, // Creator
+                    player2Id: null,
+                    whitePlayerId: null, // Undetermined
+                    blackPlayerId: null, // Undetermined
+                    players: [userId],
+                    createdBy: userId,
+                    createdAt: serverTimestamp(),
+                };
+
+                const roomRef = await addDoc(getRoomCollectionRef(), newRoom);
+                currentRoomId = roomRef.id;
+                myColor = null; // Color determined later
+                
+                // Set game listener for the newly created room
+                setupGameListener(currentRoomId);
+            } catch (error) {
+                console.error("Error creating room:", error);
+                // Use custom UI for alerts
+                gameStatusEl.textContent = `방 생성 실패: ${error.message}. Firestore 보안 규칙을 확인하세요.`;
+                gameStatusEl.classList.add('text-red-600');
+            }
+        }
+
+        async function joinRoom(roomId) {
+            if (!isAuthReady || currentRoomId) return;
+
+            try {
+                const roomDocRef = getRoomDocRef(roomId);
+                const roomSnapshot = await getDoc(roomDocRef);
+
+                if (!roomSnapshot.exists()) {
+                    // Use custom UI for alerts
+                    gameStatusEl.textContent = '방이 존재하지 않습니다.';
+                    gameStatusEl.classList.add('text-red-600');
+                    return;
+                }
+                const roomData = roomSnapshot.data();
+
+                // Check if the room is joinable (must be WAITING and have only player1)
+                if (roomData.status !== 'WAITING' || roomData.player2Id) {
+                    gameStatusEl.textContent = '이미 가득 찼거나 게임이 진행 중인 방입니다.';
+                    gameStatusEl.classList.add('text-red-600');
+                    return;
+                }
+                
+                // 1. Join as Player 2, set status to JOINED
+                await setDoc(roomDocRef, {
+                    player2Id: userId,
+                    players: [roomData.player1Id, userId],
+                    status: 'JOINED'
+                }, { merge: true });
+                
+                currentRoomId = roomId;
+                myColor = null; // Color determined later
+                setupGameListener(currentRoomId);
+
+                // 2. Immediately transition to RANDOMIZING state
+                await setDoc(roomDocRef, { status: 'RANDOMIZING' }, { merge: true });
+
+            } catch (error) {
+                console.error("Error joining room:", error);
+                gameStatusEl.textContent = `방 참여 실패: ${error.message}. Firestore 보안 규칙을 확인하세요.`;
+                gameStatusEl.classList.add('text-red-600');
+            }
+        }
+        
+        async function leaveRoom() {
+            if (!currentRoomId || !isAuthReady) return;
+
+            try {
+                const roomDocRef = getRoomDocRef(currentRoomId);
+                const roomSnapshot = await getDoc(roomDocRef);
+                const roomData = roomSnapshot.data();
+
+                if (roomData) {
+                    // I am Player 1 (Creator)
+                    if (roomData.player1Id === userId) {
+                        if (!roomData.player2Id) {
+                            // Room is empty, delete it
+                            await deleteDoc(roomDocRef);
+                        } else {
+                            // Transfer ownership: Player 2 becomes Player 1
+                            await setDoc(roomDocRef, {
+                                player1Id: roomData.player2Id,
+                                player2Id: null,
+                                whitePlayerId: null,
+                                blackPlayerId: null,
+                                status: 'WAITING',
+                                createdBy: roomData.player2Id,
+                                players: [roomData.player2Id]
+                            }, { merge: true });
+                        }
+                    } else if (roomData.player2Id === userId) {
+                        // I am Player 2, just leave
+                        await setDoc(roomDocRef, {
+                            player2Id: null,
+                            whitePlayerId: null,
+                            blackPlayerId: null,
+                            status: 'WAITING',
+                            players: [roomData.player1Id]
+                        }, { merge: true });
+                    }
+                }
+                
+            } catch (error) {
+                console.error("Error leaving/deleting room:", error);
+            }
+            
+            // Cleanup local state
+            if (unsubscribeGameListener) {
+                unsubscribeGameListener();
+                unsubscribeGameListener = null;
+            }
+            currentRoomId = null;
+            myColor = null;
+            game.reset();
+            isRandomizing = false;
+            showRoomSelection();
+        }
+
+
+        // --- Firestore Listeners ---
+        
+        /**
+         * Real-time listener for the list of available rooms.
+         */
+        function setupRoomListListener() {
+            if (!isAuthReady) return;
+            // 'in' 쿼리를 사용하면 보안 규칙이나 인덱스 문제로 실패할 수 있으므로,
+            // 간단하게 필터링 없이 전체 컬렉션을 가져와서 클라이언트에서 필터링하는 방식도 고려할 수 있지만,
+            // 일단은 쿼리를 유지하되 오류가 발생하면 콘솔에 자세히 기록합니다.
+            const q = query(getRoomCollectionRef(), where('status', 'in', ['WAITING', 'JOINED', 'RANDOMIZING', 'PLAYING']));
+            
+            onSnapshot(q, (snapshot) => {
+                roomListEl.innerHTML = '';
+                let hasRooms = false;
+                
+                snapshot.forEach(doc => {
+                    const room = doc.data();
+                    const roomId = doc.id;
+                    
+                    // Do not show my current room in the list if the game is active
+                    if (currentRoomId === roomId && room.status !== 'WAITING') return;
+
+                    hasRooms = true;
+                    
+                    // Can join if WAITING and I'm not the creator (player1Id)
+                    const canJoin = room.status === 'WAITING' && room.player1Id !== userId;
+                    const statusText = room.status === 'WAITING' ? `대기 (${room.player1Id.substring(0, 8)}...)` : '플레이 중';
+                    
+                    const roomItem = document.createElement('div');
+                    roomItem.className = `flex justify-between items-center p-2 rounded-lg ${canJoin ? 'bg-indigo-100 hover:bg-indigo-200 cursor-pointer' : 'bg-gray-100 text-gray-500'}`;
+                    roomItem.dataset.roomId = roomId;
+                    roomItem.innerHTML = `
+                        <span class="font-semibold">${room.name}</span>
+                        <span class="text-sm">${statusText}</span>
+                    `;
+
+                    if (canJoin) {
+                        roomItem.addEventListener('click', () => joinRoom(roomId));
+                    }
+                    roomListEl.appendChild(roomItem);
+                });
+
+                if (!hasRooms) {
+                    roomListEl.innerHTML = '<p class="text-center text-gray-500">생성된 방이 없습니다.</p>';
+                }
+            }, (error) => {
+                console.error("Room List Listener Error (Check Security Rules):", error);
+                roomListEl.innerHTML = `<p class="text-center text-red-500">방 목록 로드 오류: ${error.message.substring(0, 50)}...</p>`;
+            });
+        }
+
+        /**
+         * Real-time listener for the current game room state.
+         * @param {string} roomId 
+         */
+        function setupGameListener(roomId) {
+            if (unsubscribeGameListener) {
+                unsubscribeGameListener();
+            }
+
+            const roomDocRef = getRoomDocRef(roomId);
+            unsubscribeGameListener = onSnapshot(roomDocRef, (docSnapshot) => {
+                if (!docSnapshot.exists()) {
+                    // Use custom UI for alerts
+                    gameStatusEl.textContent = '방이 삭제되었습니다. 로비로 돌아갑니다.';
+                    gameStatusEl.classList.add('text-red-600');
+                    leaveRoom();
+                    return;
+                }
+
+                const roomData = docSnapshot.data();
+                if (!roomData) return;
+
+                // Determine my color based on final assignment
+                myColor = null;
+                if (roomData.whitePlayerId === userId) myColor = 'w';
+                else if (roomData.blackPlayerId === userId) myColor = 'b';
+
+                // Update UI based on room data
+                currentRoomNameEl.textContent = roomData.name;
+                
+                // Show player IDs, use P1/P2 if not yet assigned colors
+                const p1Sub = roomData.player1Id ? roomData.player1Id.substring(0, 8) + '...' : 'N/A';
+                const p2Sub = roomData.player2Id ? roomData.player2Id.substring(0, 8) + '...' : '대기 중';
+
+                if (roomData.status === 'PLAYING') {
+                    whitePlayerIdEl.textContent = roomData.whitePlayerId ? roomData.whitePlayerId.substring(0, 8) + '...' : '오류';
+                    blackPlayerIdEl.textContent = roomData.blackPlayerId ? roomData.blackPlayerId.substring(0, 8) + '...' : '오류';
+                } else {
+                    // Use P1/P2 for pre-game states
+                    whitePlayerIdEl.textContent = '결정 대기 중';
+                    blackPlayerIdEl.textContent = '결정 대기 중';
+                }
+                
+                // Special handling for RANDOMIZING state
+                if (roomData.status === 'RANDOMIZING' && roomData.player1Id && roomData.player2Id) {
+                    startColorRandomization(roomId, roomData);
+                } else if (roomData.status === 'PLAYING') {
+                    // Ensure randomization state is cleared when game starts
+                    isRandomizing = false; 
+                    gameStatusEl.classList.remove('randomizing-pulse');
+                    whitePlayerIdEl.classList.remove('randomizing-pulse');
+                    blackPlayerIdEl.classList.remove('randomizing-pulse');
+                }
+
+                // Load FEN and render board (only render the board when PLAYING)
+                if (roomData.status === 'PLAYING') {
+                    game.load(roomData.fen);
+                    renderBoard();
+                } else {
+                    // When not playing, reset board visually or show a placeholder
+                    game.reset();
+                    renderBoard();
+                }
+
+                // Update game status
+                updateStatus(roomData.status);
+                showGameArea();
+
+            }, (error) => {
+                console.error("Game Listener Error (Check Security Rules):", error);
+                gameStatusEl.textContent = "게임 상태를 불러오는 중 오류가 발생했습니다. 방을 나갑니다.";
+                gameStatusEl.classList.add('text-red-600');
+                leaveRoom();
+            });
+        }
+        
+        /**
+         * Starts visual randomization animation and confirms colors when the animation ends.
+         */
+        async function startColorRandomization(roomId, roomData) {
+            if (isRandomizing) return;
+            isRandomizing = true;
+            
+            // 1. Visual Animation Setup
+            let animationCount = 0;
+            const animationDuration = 3000; // 3 seconds
+            
+            gameStatusEl.classList.add('randomizing-pulse', 'text-indigo-600');
+            whitePlayerIdEl.classList.add('randomizing-pulse');
+            blackPlayerIdEl.classList.add('randomizing-pulse');
+
+            const animationInterval = setInterval(() => {
+                const p1Sub = roomData.player1Id.substring(0, 8) + '...';
+                const p2Sub = roomData.player2Id.substring(0, 8) + '...';
+                
+                // Alternately show who gets which color
+                if (animationCount % 2 === 0) {
+                    whitePlayerIdEl.textContent = p1Sub;
+                    blackPlayerIdEl.textContent = p2Sub;
+                } else {
+                    whitePlayerIdEl.textContent = p2Sub;
+                    blackPlayerIdEl.textContent = p1Sub;
+                }
+                
+                gameStatusEl.textContent = "색상 결정 중... 룰렛을 돌립니다!";
+
+                animationCount++;
+            }, 150);
+
+
+            // 2. Wait for animation time
+            await new Promise(resolve => setTimeout(resolve, animationDuration));
+            
+            clearInterval(animationInterval);
+            
+            // 3. Determine and Write Final Colors (Only the creator/player1 should perform the write)
+            if (roomData.createdBy === userId) {
+                const players = [roomData.player1Id, roomData.player2Id];
+                const whiteIndex = Math.floor(Math.random() * 2); // 0 or 1
+                
+                const finalWhiteId = players[whiteIndex];
+                const finalBlackId = players[1 - whiteIndex];
+                
+                await setDoc(getRoomDocRef(roomId), {
+                    whitePlayerId: finalWhiteId,
+                    blackPlayerId: finalBlackId,
+                    status: 'PLAYING' // Transition to PLAYING
+                }, { merge: true });
+            }
+            
+            // Note: The onSnapshot listener will handle the transition to PLAYING and UI cleanup
+        }
+
+
+        /**
+         * Renders the chess board and sets up event listeners.
+         */
+        function renderBoard() {
+            boardEl.innerHTML = '';
+            const boardState = game.board();
+
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const squareEl = document.createElement('div');
+                    const squareName = String.fromCharCode('a'.charCodeAt(0) + c) + (8 - r);
+                    const isLight = (r + c) % 2 === 0;
+
+                    // Board must be flipped for Black player for better view
+                    let boardIndexR = r;
+                    let boardIndexC = c;
+                    if (myColor === 'b') {
+                        boardIndexR = 7 - r;
+                        boardIndexC = 7 - c;
+                    }
+                    const flippedSquareName = String.fromCharCode('a'.charCodeAt(0) + boardIndexC) + (8 - boardIndexR);
+
+                    squareEl.className = `square flex items-center justify-center ${isLight ? 'light' : 'dark'} transition-all`;
+                    squareEl.dataset.square = flippedSquareName;
+
+                    const piece = game.get(flippedSquareName);
+                    
+                    // Create piece element (placeholder or actual piece) on every square.
+                    const pieceEl = document.createElement('span');
+                    pieceEl.className = 'piece'; 
+                    
+                    if (piece) {
+                        // Actual piece
+                        pieceEl.style.color = piece.color === 'w' ? '#FFFFFF' : '#000000';
+                        pieceEl.style.textShadow = piece.color === 'w' ? '0 0 3px #333' : 'none'; 
+                        pieceEl.textContent = pieces[piece.color === 'w' ? piece.type.toUpperCase() : piece.type.toLowerCase()];
+                    } else {
+                        // Empty square: use a transparent placeholder to maintain dimensions.
+                        pieceEl.textContent = '♟'; 
+                        pieceEl.style.visibility = 'hidden'; 
+                    }
+                    
+                    squareEl.appendChild(pieceEl);
+
+                    squareEl.addEventListener('click', handleSquareClick);
+                    boardEl.appendChild(squareEl);
+                }
+            }
+        }
+
+        /**
+         * Highlights possible moves for the selected piece.
+         * @param {string} squareName - The name of the selected square (e.g., 'e2').
+         */
+        function highlightMoves(squareName) {
+            document.querySelectorAll('.possible-move, .selected').forEach(el => {
+                el.classList.remove('possible-move');
+                el.classList.remove('selected');
+            });
+
+            if (!squareName) return;
+            
+            const moves = game.moves({ square: squareName, verbose: true });
+
+            document.querySelector(`[data-square="${squareName}"]`).classList.add('selected');
+
+            moves.forEach(move => {
+                const targetEl = document.querySelector(`[data-square="${move.to}"]`);
+                if (targetEl) {
+                    targetEl.classList.add('possible-move');
+                }
+            });
+        }
+
+        /**
+         * Chess board square click handler
+         * @param {Event} event - The click event.
+         */
+        async function handleSquareClick(event) {
+            if (!currentRoomId || !myColor || game.game_over()) return;
+            
+            const clickedSquare = event.currentTarget.dataset.square;
+            const piece = game.get(clickedSquare);
+
+            // 1. Check Turn: Cannot move if it's not my turn
+            if (game.turn() !== myColor) {
+                console.log("Not your turn.");
+                return;
+            }
+
+            if (selectedSquare) {
+                // 2. Piece already selected: Attempt to move
+                const tempGame = new Chess(game.fen());
+                const moveResult = tempGame.move({ 
+                    from: selectedSquare, 
+                    to: clickedSquare, 
+                    promotion: 'q' // Fixed promotion to Queen
+                });
+
+                if (moveResult) {
+                    // Valid move: Update Firestore
+                    selectedSquare = null;
+                    highlightMoves(null);
+                    
+                    const roomDocRef = getRoomDocRef(currentRoomId);
+                    await setDoc(roomDocRef, {
+                        fen: tempGame.fen(),
+                        turn: tempGame.turn(),
+                    }, { merge: true });
+                    
+                } else {
+                    // Invalid move: Change selection or deselect
+                    if (piece && piece.color === myColor) {
+                        selectedSquare = clickedSquare;
+                        highlightMoves(selectedSquare);
+                    } else {
+                        selectedSquare = null;
+                        highlightMoves(null);
+                    }
+                }
+            } else {
+                // 3. No piece selected: Attempt to select my piece
+                if (piece && piece.color === myColor) {
+                    selectedSquare = clickedSquare;
+                    highlightMoves(selectedSquare);
+                }
+            }
+        }
+
+        /**
+         * Updates the game status message.
+         * @param {string} roomStatus - room.status from Firestore
+         */
+        function updateStatus(roomStatus) {
+            let status = '';
+            let statusClass = 'text-gray-800';
+            
+            resetButton.classList.add('hidden'); // Default hide
+
+            if (roomStatus === 'WAITING' || roomStatus === 'JOINED') {
+                status = '상대방 대기 중...';
+                statusClass = 'text-accent';
+                // Remove randomization animation if not in that state
+                gameStatusEl.classList.remove('randomizing-pulse', 'text-indigo-600');
+                whitePlayerIdEl.classList.remove('randomizing-pulse');
+                blackPlayerIdEl.classList.remove('randomizing-pulse');
+            } else if (roomStatus === 'RANDOMIZING') {
+                status = '색상 결정 중...'; // Text updated by startColorRandomization
+                statusClass = 'text-indigo-600';
+            } else if (roomStatus === 'PLAYING') {
+                resetButton.classList.remove('hidden');
+                
+                // Clear randomization classes
+                gameStatusEl.classList.remove('randomizing-pulse', 'text-indigo-600');
+                whitePlayerIdEl.classList.remove('randomizing-pulse');
+                blackPlayerIdEl.classList.remove('randomizing-pulse');
+
+                if (game.in_checkmate()) {
+                    status = (game.turn() === 'w' ? "🎉 흑돌 승리 (체크메이트)! 🎉" : "🏆 백돌 승리 (체크메이트)! 🏆");
+                    statusClass = game.turn() === 'w' ? 'text-red-600' : 'text-primary';
+                } else if (game.in_draw()) {
+                    status = '무승부!';
+                    statusClass = 'text-accent';
+                } else {
+                    status = '차례: ' + (game.turn() === 'w' ? '백돌' : '흑돌') + (game.turn() === myColor ? ' (나)' : ' (상대)');
+                    statusClass = game.turn() === 'w' ? 'text-primary' : 'text-black';
+                    if (game.in_check()) {
+                        status += ' - 체크!';
+                    }
+                }
+            }
+            
+            gameStatusEl.textContent = status;
+            gameStatusEl.className = `text-lg font-bold ${statusClass}`;
+        }
+        
+        async function resetGame() {
+            if (!currentRoomId || !isAuthReady) return;
+
+            try {
+                const roomDocRef = getRoomDocRef(currentRoomId);
+                const roomSnapshot = await getDoc(roomDocRef);
+                const roomData = roomSnapshot.data();
+
+                // Limit reset to the creator (createdBy)
+                if (roomData.createdBy !== userId) {
+                    // Use custom UI for alerts
+                    gameStatusEl.textContent = "방장(방을 만든 사람)만 게임을 리셋할 수 있습니다.";
+                    gameStatusEl.classList.add('text-red-600');
+                    return;
+                }
+
+                // Reset
+                game.reset();
+                await setDoc(roomDocRef, {
+                    fen: game.fen(),
+                    turn: 'w',
+                    status: 'PLAYING',
+                    // Players remain the same
+                }, { merge: true });
+
+            } catch (error) {
+                console.error("Error resetting game:", error);
+                gameStatusEl.textContent = `게임 리셋 실패: ${error.message}`;
+                gameStatusEl.classList.add('text-red-600');
+            }
+        }
+
+
+        // --- Event Listeners ---
+        
+        createRoomBtn.addEventListener('click', createRoom);
+        leaveRoomBtn.addEventListener('click', leaveRoom);
+        resetButton.addEventListener('click', resetGame);
+
+
+        // --- Initial Execution ---
+        window.onload = () => {
+             // Firebase 초기화 및 인증 시작
+             initializeFirebase();
+        };
+
+    </script>
+</body>
+</html>
